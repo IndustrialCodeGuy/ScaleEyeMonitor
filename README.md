@@ -325,6 +325,7 @@ Below is an example `settings.json` showing the full schema in the same order as
 ---
 
 ## License
-(Choose and add your repo license here.)
+“Copyright © 2026 Dan Michel. All rights reserved.”
+“Not licensed for redistribution or reuse without permission.”
 
 ---
