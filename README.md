@@ -1,331 +1,231 @@
 # Scale Eye Monitor (`ScaleEyeMonitor`)
 
-Scale Eye Monitor watches a **Kahler “eye” input** via **SOAP/HTTP (`IsInputOn`)** and presents a unified status via:
+Scale Eye Monitor is a Windows tray utility for monitoring a Kahler KA-2000 style photoelectric “eye” input through SOAP/HTTP `IsInputOn` calls.
 
-- Small status window (labels)
-- Tray icon + tooltip
-- Optional toast notifications (**headline transitions only**)
+It provides a small status window, tray icon, tooltip details, optional notifications, logging, and optional integration with a TCP scale-weight stream.
 
-It supports two operating modes:
+## What it is for
 
-1. **Eyes-only** (no weight integration)
-2. **Weight Mode** (uses a TCP weight stream to gate eye behavior and adjust polling)
+Scale Eye Monitor is primarily an alignment and beam-interruption monitor for a scale eye sensor.
 
----
+It can help identify these common conditions:
 
-## What this app is (and isn’t)
+- Eye input is clear / OK
+- Eye input appears blocked or obstructed
+- Eye alignment appears off while the scale is empty
+- Eye controller is disconnected or unreachable
+- Optional weight stream is unavailable, stable, zero, or in motion
 
-This app is primarily an **alignment / beam-interruption monitor** for the eye sensor.
+When Weight Mode is enabled, the app can use the weight stream to make better decisions about when an eye condition should be treated as `Blocked`, `Obstructed`, or `Alignment off`.
 
-Even with confirm logic, the eye input alone cannot reliably prove “truck on scale”:
-- wind / debris / partial beam breaks can cause short TRUE spikes
-- polling cadence reduces sampling randomness, but can’t eliminate real-world variability
+## What it is not
 
-If you need the best “truck present” signal available here, **Weight Mode** is the intended path.
+This app is not a safety system, certified interlock, legal-for-trade weighing component, or replacement for operator judgment.
 
----
+The eye input alone cannot reliably prove that a truck is on the scale. Wind, debris, timing, partial beam breaks, or a vehicle entering/leaving can all create short TRUE conditions. Weight Mode is the intended path when the app needs the best available “truck present” context.
 
-## UI and tray behavior
+## Main features
 
-### Window
-- Shows:
-  - **Status** (headline)
-  - **Detail** (informational)
-  - **Last Poll**
-  - **HTTP Code**
-- Closing with the **X** hides to tray (unless **Exit** was chosen).
+- Windows tray app with small status window
+- Tray icon and tooltip status
+- Optional Windows notifications on headline status changes
+- Eyes-only mode using SOAP/HTTP `IsInputOn`
+- Optional Weight Mode using a newline-delimited TCP weight stream
+- Motion gating: pauses eye network checks while the scale is in motion
+- Stable-zero burst sampling to reduce false blocked/alignment events
+- Confirm-delay logic before committing a TRUE eye condition
+- Disconnected/offline handling with retry policy and cleaner user-facing messages
+- AppData-based settings and logs
+- Optional start-with-Windows and start-in-tray behavior
+- Per-monitor DPI-aware WinForms UI
 
-### Tray icon
-- **Left-click**: open the status window
-- **Right-click menu**:
-  - Settings…
-  - Readme
-  - Check Now
-  - Open Logs Folder
-  - Always on top (toggle)
-  - Exit
+## Repository layout
 
-### Always-on-top
-- Controlled by settings **and** the tray menu.
-- When enabled, the status window stays above other windows.
+```text
+.
+├─ README.md
+├─ LICENSE.md
+└─ Scale_Eye_Monitor/
+   ├─ Scale Eye Monitor.csproj
+   ├─ Program.cs
+   ├─ MainForm*.cs
+   ├─ SettingsForm.cs
+   ├─ AppSettings.cs
+   ├─ README_Program.txt
+   ├─ README_Settings.txt
+   └─ icons / image assets
+```
 
-### Startup / `--tray`
-Run with `--tray` to start hidden/minimized to the tray.
+The root `README.md` is the public overview. The detailed operator and settings documentation is kept with the application files:
 
----
+- `Scale_Eye_Monitor/README_Program.txt`
+- `Scale_Eye_Monitor/README_Settings.txt`
 
-## Headline vs detail model (important)
+Those files are copied to the publish output and are intended to sit next to the executable.
 
-The app uses two kinds of user-facing text:
+## Requirements
 
-- **Headline state** (stable, drives icons/tray/toasts)
-  - `Unknown` / `Ok` / `Blocked` / `AlignmentOff` / `Disconnected`
-- **Detail text** (informational only)
-  - Updates UI detail line but does **not** change tray icons or fire toasts by itself.
+### Runtime
 
-Toasts are emitted on **headline transitions only** (not on repeated polls).
+- Windows 10 or newer
+- Kahler KA-2000 style SOAP endpoint, or compatible endpoint exposing `IsInputOn`
+- Optional TCP weight stream for Weight Mode
 
----
+### Build
 
-## Files and folders
+- .NET 8 SDK
+- Windows development environment capable of building WinForms projects
 
-### Settings
-- **Settings file**:  
-  `%AppData%\<ExeNameWithoutExtension>\settings.json`  
-  (The folder name follows the executable name without extension.)
+The project targets:
 
-### Logs
-- **Logs folder**:  
-  `<Application folder>\logs`
+```text
+net8.0-windows10.0.19041.0
+```
 
----
+## Building
+
+From the repository root:
+
+```powershell
+cd .\Scale_Eye_Monitor
+dotnet build "Scale Eye Monitor.csproj" -c Release
+```
+
+## Publishing
+
+Framework-dependent publish:
+
+```powershell
+cd .\Scale_Eye_Monitor
+dotnet publish "Scale Eye Monitor.csproj" -c Release -r win-x64 --self-contained false
+```
+
+Self-contained publish:
+
+```powershell
+cd .\Scale_Eye_Monitor
+dotnet publish "Scale Eye Monitor.csproj" -c Release -r win-x64 --self-contained true
+```
+
+The app expects its readme and icon/image assets to be available in the publish output. Avoid trimming or aggressive single-file settings unless they have been tested with the tray icons, toast assets, and bundled readme files.
+
+## First run
+
+On first run, open Settings and configure at least:
+
+- Eye endpoint URL (`EyeUrl`)
+- Input ID (`InputId`)
+
+Example eye endpoint:
+
+```text
+http://192.168.1.50/Service.asmx
+```
+
+For Weight Mode, also configure:
+
+- Weight IP address (`WeightIp`)
+- Weight TCP port (`WeightPort`, default `4662`)
 
 ## Operating modes
 
-## 1) Eyes-only mode (Weight Mode disabled)
+### Eyes-only mode
 
-### Definition
-- `WeightModeEnabled = false`
-- The app uses eye polling + confirm delay only.
+Weight Mode disabled.
 
-### Behavior (simplified)
-1. Every `PollSeconds`:
-   - **Eye Check #1** runs (with retry/failure policy)
-2. If Eye1 is `FALSE`:
-   - Headline becomes `Ok`
-3. If Eye1 is `TRUE`:
-   - Wait `EyeConfirmDelaySeconds`
-   - Run **Eye Check #2** (confirm)
-   - If Eye2 is `TRUE` → headline becomes **`AlignmentOff`**
-   - If Eye2 is `FALSE` → ignore spike → headline becomes `Ok`
+The app polls the eye endpoint directly. If the first eye check returns TRUE, the app waits the configured confirm delay and checks again before changing the headline status.
 
-### Timing guidance
-For alignment monitoring, set `EyeConfirmDelaySeconds` to roughly:
-> worst-case truck entry time + small buffer
+In eyes-only mode, a confirmed TRUE condition is shown as `Obstructed`, because the app does not have weight context to prove whether a vehicle is fully on the scale.
 
-The goal is to avoid confirming short TRUE spikes.
+### Weight Mode
 
----
+Weight Mode enabled.
 
-## 2) Weight Mode (Weight Mode enabled)
+The app reads a TCP weight stream and classifies the scale as unavailable, in motion, stable at zero, or stable non-zero. That weight context affects eye polling and status decisions.
 
-### Definition
-- `WeightModeEnabled = true`
-- A background TCP reader connects to `WeightIp:WeightPort`
-- It classifies weight into modes that gate eye behavior and adjust timing
+At a high level:
 
----
+- In motion: eye network checks are paused
+- Stable zero: eye check #1 may use burst sampling
+- Stable non-zero: confirmed TRUE eye conditions can be shown as `Blocked`
+- Stable zero with confirmed TRUE can be shown as `Alignment off`
+- Weight unavailable falls back to eye-only style behavior and timing
 
-## Weight stream processing
+## Status model
 
-### Sampling and parsing
-- TCP loop reads bytes and assembles newline-delimited ASCII lines.
-- It accepts up to about **2 samples per second** (throttling to reduce churn).
-- Parsing extracts the **first digit run of length ≥ 2**, with an optional `-` immediately before the digit run.
+The top-line eye status is the headline state. It drives the tray icon and notifications.
 
-### Stability window
-Using `WeightWindowSeconds` (rolling window):
-- Keep samples within the time window
-- Compute `min` and `max`
-- `range = max - min`
+Common eye statuses:
 
-Stability:
-- **stable** if `range <= (WeightStableBand * 2)`  
-  (band is +/-; the total swing allowed is 2× band)
+- `OK`
+- `Blocked`
+- `Obstructed`
+- `Alignment off`
+- `Disconnected`
 
-Zero:
-- **zero** if `abs(weight) < WeightZeroBand`
+The detail line is informational. It can change without changing the tray icon or firing a notification.
 
-### Weight modes
-- **Unavailable**
-  - Not started, stopped, disconnected, error, or **stale**
-- **Unstable**
-  - Weight is changing more than the stability band allows
-- **StableZero**
-  - Stable and near zero
-- **StableNonZero**
-  - Stable and not near zero (typically “truck present”)
+Scale status is shown separately when Weight Mode is enabled:
 
-### Stale handling
-If no accepted weight updates arrive within `WeightStaleSeconds`, the snapshot is treated as **Unavailable ("stale")**.
+- `Zero`
+- `Stable`
+- `In motion`
+- `Unavailable`
+- `—`
 
----
+## Files and folders
 
-## How Weight Mode changes eye behavior
+Settings and logs are stored under the user’s AppData folder:
 
-### A) Motion gating (most important)
-When weight mode is **Unstable (motion)**:
-- The app **pauses eye network calls**
-- It runs a fast local “motion cadence” loop (default 1s) to re-check weight state
-- UI detail indicates motion and that eyes are paused/ignored
+```text
+%APPDATA%\<App Name>\settings.json
+%APPDATA%\<App Name>\logs\log_yyyyMMdd.txt
+```
 
-This avoids using the eye input when the system is least reliable (vehicle movement).
+The exact folder name follows the app/product name used by the executable.
 
-### B) Dynamic timing (poll + confirm delay)
-Each poll computes timing from the current weight snapshot:
-- Poll cadence (seconds)
-- Confirm delay (seconds)
-- Whether to pause eyes due to motion
+## Startup behavior
 
-Stable-nonzero also supports a **fast window**:
-- For `StableNonZeroFastWindowSeconds` after entering StableNonZero, the app may use the “fast mode” timing (poll + confirm delay) before settling into the normal stable-nonzero cadence.
+The app can optionally:
 
-### C) Burst protection (StableZero only)
-When weight is usable and **StableZero**:
-- **Eye Check #1** uses a **burst** (`WeightBurstCount` with `WeightBurstDelayMs`)
-- If any successful response returns `FALSE`, the result is treated as **OK immediately** (anti-false-positive)
-- If the burst has **some successes** but fewer than `WeightBurstMinTrueSuccess` and no false:
-  - The result is treated as **inconclusive**
-  - **No headline change**
-  - Detail is updated (optionally logged in debug mode)
-- If burst yields **0 successes**:
-  - The normal failure policy is invoked once (to decide if this is offline/unreachable)
+- Start with Windows using a per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry
+- Start hidden in the tray
+- Keep the main status window always on top
 
-When weight is **StableNonZero**, Eye #1 is **one-shot** (no burst) until the mode changes away from StableNonZero.
-
-### D) Confirm protection (motion during confirm)
-If Eye1 is `TRUE` and the app is waiting the confirm delay:
-- If weight becomes **Unstable** during the delay:
-  - Confirm is aborted
-  - Headline is not committed based on the eye input
-
-### E) Labeling (`Blocked` vs `AlignmentOff`)
-A confirmed eye `TRUE` becomes:
-- **`Blocked`** only if weight is **StableNonZero at commit time**
-- Otherwise **`AlignmentOff`**
-
-This intentionally ties “Blocked” to “truck present” as best as possible.
-
----
-
-## Eye network failure policy (`Disconnected`)
-
-- The SOAP call has a retry wrapper:
-  - Retries up to `FailureRetryCount`
-  - Delay between attempts: `FailureRetryDelaySeconds`
-  - Throttles repeated log/UI noise during prolonged failures
-  - Detects “probably offline” using socket-error heuristics
-
-When the device is deemed **offline/unreachable**, the app forces headline:
-- **`Disconnected`** (toast on transition)
-
-### Weight monitor interaction during eye outages
-If eyes are forced **Disconnected** and Weight Mode is enabled:
-- The app stops the weight monitor
-- Weight state is set Unavailable (reason like “eyes offline”)
-- When eyes recover, weight monitoring can be resumed
-
----
-
-## Debug logging and burst test
-
-- Enabling **Debug logging**:
-  - Produces more verbose logs
-  - Shows the burst/poll test section in Settings
-- Burst test repeatedly calls `IsInputOn` for diagnostics
-  - While running:
-    - OK/Cancel disabled
-    - Burst button becomes **Cancel**
-
----
-
-## Settings reference (high level)
-
-### Eye / general
-- `LocationName` – used in tray text
-- `IpAddress` – eye device IPv4
-- `InputId` – which input to query
-- `PollSeconds` – eyes-only base poll interval
-- `EyeConfirmDelaySeconds` – eyes-only confirm delay
-- `FailureRetryDelaySeconds`, `FailureRetryCount` – eye retry/failure policy
-- `AlwaysOnTop` – keep window top-most
-
-### Weight mode
-- `WeightModeEnabled`
-- `WeightIp`, `WeightPort`
-- `WeightPollSeconds` – weight-mode default cadence
-- `PollSecondsStableNonZero` – stable-nonzero cadence
-- `WeightEyeConfirmDelaySeconds` – weight-mode default confirm delay
-- `WeightEyeConfirmDelayFastSeconds` – fast-window confirm delay
-- `StableNonZeroFastWindowSeconds` – duration of fast stable-nonzero behavior
-- `WeightBurstCount`, `WeightBurstDelayMs`, `WeightBurstMinTrueSuccess`
-- `WeightStableBand`, `WeightZeroBand`, `WeightWindowSeconds`, `WeightStaleSeconds`
-
-### Diagnostics
-- `DebugLogging`
-- `BurstTestCount`, `BurstTestDelayMs`
-
----
+These options are controlled from the tray menu and Settings UI.
 
 ## Troubleshooting
 
-- **Headline = `Disconnected`**
-  - Wrong IP, device down, network issue, or unreachable endpoint.
-  - Confirm eye device power/network; check routing/firewall.
+### Eye status is `Disconnected`
 
-- **Frequent `AlignmentOff` in eyes-only mode**
-  - Increase `EyeConfirmDelaySeconds` (worst-case entry time + buffer).
+Check the eye endpoint URL, controller power, network path, firewall/routing, and whether the SOAP endpoint is reachable from the PC running the app.
 
-- **Weight Mode always `Unavailable`**
-  - Verify `WeightIp:WeightPort`, that the stream is reachable, and that it emits parseable weights.
-  - Check for stale: raise `WeightStaleSeconds` if the stream is slow/quiet.
+### Frequent `Obstructed` or `Alignment off`
 
-- **Weight Mode frequently `Unstable`**
-  - Increase `WeightStableBand` and/or `WeightWindowSeconds` if the signal naturally jitters.
+Review the confirm delay and the physical eye alignment. In eyes-only mode, the confirm delay should be long enough to avoid normal vehicle entry/exit timing being mistaken for a persistent blocked condition.
 
-- **“Inconclusive burst” detail messages**
-  - Indicates intermittent network success without enough confidence to treat as TRUE.
-  - Adjust burst parameters or investigate network stability.
+### Weight status is `Unavailable`
 
----
+Check the weight IP/port, verify that the TCP stream is reachable, and confirm that the device is sending parseable newline-delimited weight values often enough to avoid stale handling.
 
-## Example configuration (`settings.json`)
+### Weight status stays `In motion`
 
-Below is an example `settings.json` showing the full schema in the same order as the Settings UI.
+Review the weight stability settings. A naturally noisy stream may need a larger stability band or a longer stability window.
 
-> Note: The app expects strict IPv4 values for `IpAddress` and (when enabled) `WeightIp`.
-> The example uses loopback (`127.0.0.1`) for illustration.
+## Documentation
 
-```json
-{
-  "LocationName": "Location1",
-  "IpAddress": "127.0.0.1",
-  "InputId": 0,
-  "PollSeconds": 15,
-  "EyeConfirmDelaySeconds": 20,
-  "FailureRetryDelaySeconds": 2,
-  "FailureRetryCount": 3,
+For full behavior details, see:
 
-  "WeightModeEnabled": true,
-  "WeightIp": "127.0.0.1",
-  "WeightPort": 4662,
+- `Scale_Eye_Monitor/README_Program.txt`
 
-  "WeightPollSeconds": 60,
-  "WeightEyeConfirmDelaySeconds": 20,
-  "PollSecondsStableNonZero": 5,
-  "WeightEyeConfirmDelayFastSeconds": 5,
-  "StableNonZeroFastWindowSeconds": 120,
+For setting-by-setting guidance, see:
 
-  "WeightBurstCount": 3,
-  "WeightBurstDelayMs": 500,
-  "WeightBurstMinTrueSuccess": 1,
-
-  "WeightStableBand": 20,
-  "WeightZeroBand": 1,
-  "WeightWindowSeconds": 3,
-  "WeightStaleSeconds": 2,
-
-  "DebugLogging": false,
-  "BurstTestCount": 5,
-  "BurstTestDelayMs": 1000,
-
-  "AlwaysOnTop": true
-}
-
----
+- `Scale_Eye_Monitor/README_Settings.txt`
 
 ## License
-“Copyright © 2026 Dan Michel. All rights reserved.”
-“Not licensed for redistribution or reuse without permission.”
 
----
+Copyright © 2026 Dan Michel.
+
+This project is licensed under the PolyForm Noncommercial License 1.0.0. You may use, study, modify, and share this software for noncommercial purposes, subject to the license terms. Commercial or for-profit use requires separate written permission from the copyright holder.
+
+Because commercial use is restricted, this project is source-available rather than OSI open source. See `LICENSE.md` for the full license text.
