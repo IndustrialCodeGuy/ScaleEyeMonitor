@@ -4,33 +4,33 @@ using System.Net.Sockets;
 namespace Scale_Eye_Monitor
 {
     /*
- * MainForm.WeightMonitor.cs
- * -------------------------
- * Partial: MainForm (Scale Eye Monitor)
- *
- * Responsibilities:
- *   Maintain a background TCP connection to the scale weight stream and publish a
- *   lightweight WeightState snapshot used by PollOnceAsync() for gating decisions:
- *     - Start/stop driven by settings (WeightModeEnabled + endpoint validation)
- *     - Connect/reconnect with exponential backoff
- *     - Read bytes and assemble newline-delimited ASCII lines
- *     - Parse weight from the device’s ASCII output (first 2+ digit token, optional '-' prefix)
- *     - Throttle accepted parsed samples (currently ~2 Hz) to reduce churn
- *     - Maintain a rolling time window and compute stability (min/max range)
- *     - Expose GetWeightStateSnapshot() with stale detection (WeightStaleSeconds)
- *     - Emit toasts/logs on connect/disconnect/failure with throttling
- *
- * Polling integration:
- *   - When weight transitions INTO Unstable (motion):
- *       * CancelActivePoll() stops confirm delays / in-flight eye calls ASAP
- *       * RescheduleNextPollFromNow(pollSoon:true) wakes the poll loop immediately
- *       * Polling then runs in “motion cadence” (WeightMotionCheckSeconds) without eye calls
- *
- * Depends on:
- *   - Runtime fields: WeightModeEnabled, WeightIp/Port, bands/windows/stale seconds, DebugLogging, _shutdown
- *   - Logging helper: Log()
- *   - ToastHelper + IpValidator
- */
+     * MainForm.WeightMonitor.cs
+     * -------------------------
+     * Partial: MainForm (Scale Eye Monitor)
+     *
+     * Responsibilities:
+     *   Maintain a background TCP connection to the scale weight stream and publish a
+     *   lightweight WeightState snapshot used by PollOnceAsync() for gating decisions:
+     *     - Start/stop driven by settings (WeightModeEnabled + endpoint validation)
+     *     - Connect/reconnect with exponential backoff
+     *     - Read bytes and assemble newline-delimited ASCII lines
+     *     - Parse weight from the device’s ASCII output (first 2+ digit token, optional '-' prefix)
+     *     - Throttle accepted parsed samples (currently ~2 Hz) to reduce churn
+     *     - Maintain a rolling time window and compute stability (min/max range)
+     *     - Expose GetWeightStateSnapshot() with stale detection (WeightStaleSeconds)
+     *     - Emit toasts/logs on connect/disconnect/failure with throttling
+     *
+     * Polling integration:
+     *   - When weight transitions INTO Unstable (motion):
+     *       * CancelActivePoll() stops confirm delays / in-flight eye calls ASAP
+     *       * RescheduleNextPollFromNow(pollSoon:true) wakes the poll loop immediately
+     *       * Polling then runs in “motion cadence” (WeightMotionCheckSeconds) without eye calls
+     *
+     * Depends on:
+     *   - Runtime fields: WeightModeEnabled, WeightIp/Port, bands/windows/stale seconds, DebugLogging
+     *   - Logging helper: Log()
+     *   - ToastHelper + IpValidator
+     */
 
     public sealed partial class MainForm
     {
@@ -39,7 +39,7 @@ namespace Scale_Eye_Monitor
         // =====================================================================
         private enum WeightMode { Unavailable, Unstable, StableZero, StableNonZero }
 
-        private sealed record WeightState(
+        private readonly record struct WeightState(
             WeightMode Mode,
             int? Weight,
             int Range,
@@ -60,6 +60,9 @@ namespace Scale_Eye_Monitor
 
         private bool WeightToastsMuted => DateTime.UtcNow < _muteWeightToastsUntilUtc;
 
+        // Optional: periodic reminder while failing (set 0 to disable)
+        private static readonly TimeSpan _weightFailReminderInterval = TimeSpan.FromMinutes(5);
+
         // =====================================================================
         //  State + snapshot storage (protected by _weightLock)
         // =====================================================================
@@ -73,22 +76,20 @@ namespace Scale_Eye_Monitor
         private CancellationTokenSource? _weightCts;
         private Task? _weightTask;
 
-        // Optional: periodic reminder while failing (set 0 to disable)
-        private static readonly TimeSpan _weightFailReminderInterval = TimeSpan.FromMinutes(5);
-
         // =====================================================================
         //  Start/stop lifecycle (driven by settings)
         // =====================================================================
         private void StartOrStopWeightMonitor()
         {
-            // Disabled => ensure stopped.
+            // Disabled => ensure stopped and do not carry weight-mode history into eyes-only mode.
             if (!WeightModeEnabled)
             {
+                ResetAlignmentCycleTracking("weight mode disabled");
                 StopWeightMonitor();
                 return;
             }
 
-            // Validate endpoint (prevents background loop hammering empty/invalid IP).
+            // Validate endpoint (prevents the background loop from hammering an empty/invalid weight endpoint).
             if (string.IsNullOrWhiteSpace(WeightIp) ||
                 !IpValidator.IsStrictIPv4(WeightIp) ||
                 WeightPort <= 0)
@@ -122,6 +123,7 @@ namespace Scale_Eye_Monitor
         }
 
         private void StopWeightMonitor() => StopWeightMonitor(resetToastState: true);
+
         private void StopWeightMonitor(bool resetToastState)
         {
             var cts = _weightCts;
@@ -182,14 +184,7 @@ namespace Scale_Eye_Monitor
                 if (st.Mode != WeightMode.Unavailable && st.LastUpdate != DateTime.MinValue)
                 {
                     if ((DateTime.Now - st.LastUpdate).TotalSeconds > WeightStaleSeconds)
-                    {
-                        return new WeightState(
-                            WeightMode.Unavailable,
-                            st.Weight,
-                            st.Range,
-                            st.LastUpdate,
-                            "stale");
-                    }
+                        return new WeightState(WeightMode.Unavailable, st.Weight, st.Range, st.LastUpdate, "stale");
                 }
 
                 return st;
@@ -203,7 +198,7 @@ namespace Scale_Eye_Monitor
         {
             int backoffMs = 1000;
 
-            while (!token.IsCancellationRequested && !_shutdown)
+            while (!token.IsCancellationRequested)
             {
                 try
                 {
@@ -250,7 +245,7 @@ namespace Scale_Eye_Monitor
                         {
                             if (len <= 0) return;
 
-                            ReadOnlySpan<byte> line = new ReadOnlySpan<byte>(lineBuf, 0, len);
+                            ReadOnlySpan<byte> line = new(lineBuf, 0, len);
 
                             // trim trailing \r (CRLF)
                             if (line.Length > 0 && line[^1] == (byte)'\r')
@@ -268,7 +263,7 @@ namespace Scale_Eye_Monitor
                             }
                         }
 
-                        while (!token.IsCancellationRequested && !_shutdown)
+                        while (!token.IsCancellationRequested)
                         {
                             int n = await ns.ReadAsync(readBuf.AsMemory(0, readBuf.Length), token).ConfigureAwait(false);
                             if (n == 0)
@@ -319,7 +314,7 @@ namespace Scale_Eye_Monitor
                 }
                 catch (Exception ex)
                 {
-                    if (token.IsCancellationRequested || _shutdown)
+                    if (token.IsCancellationRequested)
                         break;
 
                     HandleWeightMonitorFailure(ex, backoffMs);
@@ -328,8 +323,6 @@ namespace Scale_Eye_Monitor
                     backoffMs = Math.Min(backoffMs * 2, 30000);
                 }
             }
-
-            SetWeightUnavailable("stopped");
         }
 
         // =====================================================================
@@ -340,7 +333,6 @@ namespace Scale_Eye_Monitor
             bool wasConnected = _weightWasConnected;
 
             SetWeightUnavailable($"{ex.GetType().Name}: {ex.Message}");
-
             _weightOutageActive = true;
 
             // Startup case: we've never connected yet
@@ -351,10 +343,12 @@ namespace Scale_Eye_Monitor
                 try
                 {
                     if (!WeightToastsMuted)
+                    {
                         ToastHelper.ShowWarningToast(
                             "Scale Eye Monitor",
                             $"Weight stream unreachable at startup ({WeightIp}:{WeightPort}). " +
                             "Weight mode is unavailable; using eyes-only until it connects.");
+                    }
                 }
                 catch { }
             }
@@ -367,9 +361,11 @@ namespace Scale_Eye_Monitor
                 try
                 {
                     if (!WeightToastsMuted)
+                    {
                         ToastHelper.ShowWarningToast(
                             "Scale Eye Monitor",
                             "Weight stream disconnected. Falling back to eyes-only until it returns.");
+                    }
                 }
                 catch { }
             }
@@ -416,6 +412,14 @@ namespace Scale_Eye_Monitor
                 _weightSamples.Clear();
                 _weightState = new WeightState(WeightMode.Unavailable, null, 0, DateTime.Now, reason);
             }
+
+            ResetAlignmentCycleTracking($"weight unavailable: {reason}");
+
+            if (WeightModeEnabled && !_forcedDisconnectActive)
+            {
+                SetDesiredPollSeconds(PollSeconds);          // eyes-only cadence immediately
+                RescheduleNextPollFromNow(pollSoon: true);   // wake loop to recompute now
+            }
         }
 
         private void UpdateWeightFromSample(int weight, DateTime ts)
@@ -430,17 +434,18 @@ namespace Scale_Eye_Monitor
                 _weightSamples.Enqueue((ts, weight));
 
                 // Trim samples outside the window
-                while (_weightSamples.Count > 0 && (ts - _weightSamples.Peek().Ts).TotalSeconds > WeightWindowSeconds)
+                while (_weightSamples.Count > 0 &&
+                       (ts - _weightSamples.Peek().Ts).TotalSeconds > WeightWindowSeconds)
                 {
                     _weightSamples.Dequeue();
                 }
 
                 // Compute min/max over window
                 int min = weight, max = weight;
-                foreach (var s in _weightSamples)
+                foreach (var (_, sampleWeight) in _weightSamples)
                 {
-                    if (s.Weight < min) min = s.Weight;
-                    if (s.Weight > max) max = s.Weight;
+                    if (sampleWeight < min) min = sampleWeight;
+                    if (sampleWeight > max) max = sampleWeight;
                 }
 
                 int range = max - min;
@@ -449,26 +454,29 @@ namespace Scale_Eye_Monitor
                 bool stable = range <= (WeightStableBand * 2);
                 bool isZero = Math.Abs(weight) < WeightZeroBand;
 
-                WeightMode mode =
-                stable
-                                ? (isZero ? WeightMode.StableZero : WeightMode.StableNonZero)
-                                : WeightMode.Unstable;
+                WeightMode mode = stable ? (isZero ? WeightMode.StableZero : WeightMode.StableNonZero) : WeightMode.Unstable;
 
                 prevMode = _weightState.Mode;
                 newState = new WeightState(mode, weight, range, ts, "");
                 _weightState = newState;
 
                 modeChanged = (mode != prevMode);
-                if (modeChanged)
+
+                if (DebugLogging && modeChanged)
                     modeMsg = $"Weight mode -> {mode} (w={weight}, range={range})";
             }
 
             // IMPORTANT: notify AFTER the lock (can cancel polls / wake scheduler)
+            NoteAlignmentCycleWeight(newState);
+
             if (modeMsg is not null)
                 Log(modeMsg);
 
             if (modeChanged)
                 OnWeightModeTransition(prevMode, newState);
+
+            if (prevMode == WeightMode.Unavailable && newState.Mode != WeightMode.Unavailable && !_forcedDisconnectActive)
+                RescheduleNextPollFromNow(pollSoon: true);
         }
 
         // =====================================================================
@@ -561,15 +569,14 @@ namespace Scale_Eye_Monitor
             {
                 w = 0;
 
-                int s = start;
-                bool neg = (s > 0 && line[s - 1] == (byte)'-');
-                if (neg) s--;
+                bool neg = (start > 0 && line[start - 1] == (byte)'-');
 
                 long val = 0;
                 for (int i = start; i < end; i++)
                 {
                     byte c = line[i];
                     if (c < (byte)'0' || c > (byte)'9') return false;
+
                     val = (val * 10) + (c - (byte)'0');
                     if (val > int.MaxValue) return false; // conservative
                 }
