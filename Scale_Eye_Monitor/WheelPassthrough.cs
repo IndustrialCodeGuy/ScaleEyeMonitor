@@ -9,7 +9,7 @@ namespace Scale_Eye_Monitor
     /// </summary>
     internal static class WheelPassthrough
     {
-        private const int WM_MOUSEWHEEL = 0x020A;
+        internal const int WmMouseWheel = 0x020A;
         private const int MK_SHIFT = 0x0004;
         private const int MK_CONTROL = 0x0008;
 
@@ -18,8 +18,8 @@ namespace Scale_Eye_Monitor
 
         internal static void Enable(Control input, Control scrollTarget)
         {
-            if (input is null) throw new ArgumentNullException(nameof(input));
-            if (scrollTarget is null) throw new ArgumentNullException(nameof(scrollTarget));
+            ArgumentNullException.ThrowIfNull(input);
+            ArgumentNullException.ThrowIfNull(scrollTarget);
 
             PassWheelTo(input, scrollTarget);
 
@@ -44,8 +44,19 @@ namespace Scale_Eye_Monitor
                 int wParam = MakeWParamForWheel(e.Delta);
                 int lParam = MakeLParamFromScreenPoint(screenPt);
 
-                SendMessage(scrollTarget.Handle, WM_MOUSEWHEEL, (IntPtr)wParam, (IntPtr)lParam);
+                ForwardRawWheel(scrollTarget, (IntPtr)wParam, (IntPtr)lParam);
             };
+        }
+
+        internal static bool ForwardRawWheel(Control scrollTarget, IntPtr wParam, IntPtr lParam)
+        {
+            ArgumentNullException.ThrowIfNull(scrollTarget);
+
+            if (scrollTarget.IsDisposed) return false;
+            if (!scrollTarget.IsHandleCreated) return false;
+
+            SendMessage(scrollTarget.Handle, WmMouseWheel, wParam, lParam);
+            return true;
         }
 
         private static int MakeWParamForWheel(int delta)
