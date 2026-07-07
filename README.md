@@ -229,3 +229,4 @@ Copyright © 2026 Dan Michel.
 This project is licensed under the PolyForm Noncommercial License 1.0.0. You may use, study, modify, and share this software for noncommercial purposes, subject to the license terms. Commercial or for-profit use requires separate written permission from the copyright holder.
 
 Because commercial use is restricted, this project is source-available rather than OSI open source. See `LICENSE.md` for the full license text.
+Third-party assets may be subject to their own licenses. The application (EXE) icon uses or is derived from a Flaticon icon by Freepik and is attributed in `THIRD_PARTY_NOTICES.md`.
