@@ -3,33 +3,33 @@ using Microsoft.Win32;
 namespace Scale_Eye_Monitor
 {
     /*
- * MainForm.Settings.cs
- * --------------------
- * Partial: MainForm (Scale Eye Monitor)
- *
- * Responsibilities:
- *   - Own the runtime “settings fields” (copied from AppSettings; kept in UI order).
- *   - ApplySettings(AppSettings): copy normalized settings into runtime fields.
- *   - Settings dialog lifecycle:
- *       * Enforce single-instance settings dialog (_settingsDialogOpen / _settingsDlg)
- *       * Bring-to-front behavior when the dialog is already open
- *       * Validate/commit dialog values into AppSettings
- *       * Save settings.json and apply Run-at-login (HKCU Run key)
- *   - Diff-based runtime updates after settings changes:
- *       * Recreate HttpClient when eye endpoint changes
- *       * Restart when enabled and endpoint changes; stop when disabled
- *       * Update tray text when LocationName changes
- *       * Optionally run an immediate poll after settings changes
- *
- * Concurrency model (important):
- *   - Polling is guarded by _opGate. Settings apply cancels any active poll
- *     and waits for the gate so changes apply against a quiet system.
- *   - Immediate poll after the dialog closes re-enters through PollOnceSafeAsync.
- *
- * Ordering rule:
- *   Any “copy settings” blocks should follow SettingsForm order:
- *     Eye settings -> Start with Windows -> Weight Mode/settings -> Debug -> Burst
- */
+     * MainForm.Settings.cs
+     * --------------------
+     * Partial: MainForm (Scale Eye Monitor)
+     *
+     * Responsibilities:
+     *   - Own the runtime “settings fields” (copied from AppSettings; kept in UI order).
+     *   - ApplySettings(AppSettings): copy normalized settings into runtime fields.
+     *   - Settings dialog lifecycle:
+     *       * Enforce single-instance settings dialog (_settingsDialogOpen / _settingsDlg)
+     *       * Bring-to-front behavior when the dialog is already open
+     *       * Validate/commit dialog values into AppSettings
+     *       * Save settings.json and apply Run-at-login (HKCU Run key)
+     *   - Diff-based runtime updates after settings changes:
+     *       * Recreate HttpClient when the eye endpoint URL or InputId changes
+     *       * Restart weight monitor when Weight Mode / endpoint changes; stop when disabled
+     *       * Apply persisted UX toggles (StartInTray / AlwaysOnTop)
+     *       * Optionally run an immediate poll after settings changes
+     *
+     * Concurrency model (important):
+     *   - Polling is guarded by _opGate. Settings apply cancels any active poll
+     *     and waits for the gate so changes apply against a quiet system.
+     *   - Immediate poll after the dialog closes re-enters through PollOnceSafeAsync.
+     *
+     * Ordering rule:
+     *   Any “copy settings” blocks should follow SettingsForm order:
+     *     Eye/general -> Notifications -> Start with Windows (registry) -> Weight Mode/settings -> Debug/burst -> Startup UX (StartInTray/AlwaysOnTop)
+     */
 
     public sealed partial class MainForm
     {
@@ -38,8 +38,7 @@ namespace Scale_Eye_Monitor
         //  Ordering matches SettingsForm / AppSettings UI order
         // =====================================================================
         // ---- Eye / general ----
-        private string LocationName;
-        private string IpAddress;
+        private string EyeUrl = "";
         private int InputId;
         private int PollSeconds;
 
@@ -52,7 +51,7 @@ namespace Scale_Eye_Monitor
 
         // ---- Weight mode ----
         private bool WeightModeEnabled;
-        private string WeightIp;
+        private string WeightIp = "";
         private int WeightPort;
 
         // Weight-mode default poll interval (used for StableZero and “normal” polling)
@@ -73,37 +72,42 @@ namespace Scale_Eye_Monitor
         private int WeightBurstDelayMs;
         private int WeightBurstMinTrueSuccess;
 
+        // Minimum absolute stable weight before Blocked uses vehicle-on-scale guidance.
+        private int BlockedGuidanceMinWeight = 1000;
+
         // Weight gating tuning
         private int WeightStableBand = 20;      // +/- band for stability
         private int WeightZeroBand = 50;        // abs(weight) < band => “zero”
-        private int WeightWindowSeconds = 3;    // stability window length
+        private int WeightWindowSeconds = 2;    // stability window length
         private int WeightStaleSeconds = 3;     // if no updates within this, mark “stale/unavailable”
 
         // ---- Debug / diagnostics ----
         private bool DebugLogging;
 
         // Burst test (settings-driven)
-        private int BurstTestCount = 50;
-        private int BurstTestDelayMs = 200;
+        private int BurstTestCount = 20;
+        private int BurstTestDelayMs = 500;
+
+        // ---- Startup behavior ----
+        private bool StartInTray = true;
 
         // =====================================================================
         //  Paths
         // =====================================================================
-        private readonly string appDataDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            Path.GetFileNameWithoutExtension(Application.ExecutablePath)
-        );
+        private static readonly string AppDataDir =
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                Application.ProductName ?? "Scale Eye Monitor");
 
-        private static string LogDir => Path.Combine(Application.StartupPath, "logs");
-        
-        private string SettingsPath => Path.Combine(appDataDir, "settings.json");
+        private static readonly string LogDir = Path.Combine(AppDataDir, "logs");
+        private static readonly string SettingsPath = Path.Combine(AppDataDir, "settings.json");
 
         // =====================================================================
         //  Registry Run key (Start with Windows)
         // =====================================================================
         private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string RunValue = "ScaleEyeMonitor";
-        
+
         // =====================================================================
         //  Settings dialog state
         // =====================================================================
@@ -119,14 +123,17 @@ namespace Scale_Eye_Monitor
             s.NormalizeAndClamp();
 
             // ---- Eye / general ----
-            LocationName = s.LocationName;
-            IpAddress = s.IpAddress;
+            EyeUrl = s.EyeUrl;
             InputId = s.InputId;
             PollSeconds = s.PollSeconds;
 
             EyeConfirmDelaySeconds = s.EyeConfirmDelaySeconds;
             FailureRetryDelaySeconds = s.FailureRetryDelaySeconds;
             FailureRetryCount = s.FailureRetryCount;
+
+            // ---- Notifications ----
+            SetNotificationDuration(s.NotificationDuration);
+            SetNotificationsEnabled(s.NotificationsEnabled);
 
             // ---- Weight mode ----
             WeightModeEnabled = s.WeightModeEnabled;
@@ -143,6 +150,7 @@ namespace Scale_Eye_Monitor
             WeightBurstCount = s.WeightBurstCount;
             WeightBurstDelayMs = s.WeightBurstDelayMs;
             WeightBurstMinTrueSuccess = s.WeightBurstMinTrueSuccess;
+            BlockedGuidanceMinWeight = s.BlockedGuidanceMinWeight;
 
             WeightStableBand = s.WeightStableBand;
             WeightZeroBand = s.WeightZeroBand;
@@ -154,11 +162,23 @@ namespace Scale_Eye_Monitor
             BurstTestCount = s.BurstTestCount;
             BurstTestDelayMs = s.BurstTestDelayMs;
 
+            StartInTray = s.StartInTray;
             SetAlwaysOnTop(s.AlwaysOnTop);
 
             // If weight mode was turned off by settings, clear the fast-window tracking
             if (!WeightModeEnabled)
                 ResetStableNonZeroFastWindow();
+
+            // Update the main layout and "Scale Status" top-row label immediately
+            // after applying settings. This hides Scale Status when Weight Mode is off.
+            try
+            {
+                UiSafe(ApplyMainLayoutMetrics);
+
+                WeightState ws = WeightModeEnabled ? GetWeightStateSnapshot() : new WeightState(WeightMode.Unavailable, null, 0, DateTime.MinValue, "");
+                UpdateScaleStatusFromWeight(ws);
+            }
+            catch { }
         }
 
         // =====================================================================
@@ -185,7 +205,7 @@ namespace Scale_Eye_Monitor
         // =====================================================================
         //  Settings dialog flow
         // =====================================================================
-        private async void Settings_Click(object? sender, EventArgs e)
+        private void Settings_Click(object? sender, EventArgs e)
         {
             if (_shutdown) return;
 
@@ -195,6 +215,8 @@ namespace Scale_Eye_Monitor
                 return;
             }
             _settingsDialogOpen = true;
+            // Ensure the modal settings dialog isn't dragged into topmost behavior.
+            SetAlwaysOnTop(_alwaysOnTop);
 
             bool gateHeld = false;
             void ReleaseGate()
@@ -243,11 +265,11 @@ namespace Scale_Eye_Monitor
                         // -----------------------------
                         // Detect changes (grouped like UI)
                         // -----------------------------
-                        bool locationChanged =
-                            !string.Equals(Norm(old.LocationName), Norm(now.LocationName), StringComparison.Ordinal);
+                        bool eyeUrlChanged =
+                            !string.Equals(Norm(old.EyeUrl), Norm(now.EyeUrl), StringComparison.OrdinalIgnoreCase);
 
                         bool eyeEndpointChanged =
-                            !string.Equals(Norm(old.IpAddress), Norm(now.IpAddress), StringComparison.OrdinalIgnoreCase) ||
+                            eyeUrlChanged ||
                             old.InputId != now.InputId;
 
                         bool eyeTimingOrPolicyChanged =
@@ -266,7 +288,7 @@ namespace Scale_Eye_Monitor
 
                         bool weightTimingChanged =
                             old.WeightPollSeconds != now.WeightPollSeconds ||
-                            old.WeightEyeConfirmDelaySeconds != now.WeightEyeConfirmDelaySeconds || // NEW
+                            old.WeightEyeConfirmDelaySeconds != now.WeightEyeConfirmDelaySeconds ||
                             old.PollSecondsStableNonZero != now.PollSecondsStableNonZero ||
                             old.StableNonZeroFastWindowSeconds != now.StableNonZeroFastWindowSeconds ||
                             old.WeightEyeConfirmDelayFastSeconds != now.WeightEyeConfirmDelayFastSeconds ||
@@ -278,20 +300,21 @@ namespace Scale_Eye_Monitor
                             old.WeightStableBand != now.WeightStableBand ||
                             old.WeightZeroBand != now.WeightZeroBand ||
                             old.WeightWindowSeconds != now.WeightWindowSeconds ||
-                            old.WeightStaleSeconds != now.WeightStaleSeconds;
+                            old.WeightStaleSeconds != now.WeightStaleSeconds ||
+                            old.BlockedGuidanceMinWeight != now.BlockedGuidanceMinWeight;
 
                         bool debugOrBurstChanged =
                             old.DebugLogging != now.DebugLogging ||
                             old.BurstTestCount != now.BurstTestCount ||
                             old.BurstTestDelayMs != now.BurstTestDelayMs;
 
-                        //bool runtimeEyeWasDisconnected = (_headline != HeadlineState.Ok);
                         bool runtimeWeightWasConnected = _weightWasConnected;
 
                         // -----------------------------
                         // Apply to runtime fields
                         // -----------------------------
                         ApplySettings(s);
+                        UpdateStartupTrayMenuText();
 
                         // IMPORTANT:
                         // _desiredPollSeconds should not be forced to "1" here unconditionally.
@@ -299,7 +322,7 @@ namespace Scale_Eye_Monitor
                         // Timer/loop logic should derive from PollSeconds + weight state.
                         if (old.PollSeconds != now.PollSeconds || eyeEndpointChanged || weightEndpointChanged || weightTimingChanged)
                         {
-                            System.Threading.Volatile.Write(ref _desiredPollSeconds, PollSeconds);
+                            SetDesiredPollSeconds(PollSeconds);
                         }
 
                         // -----------------------------
@@ -316,6 +339,14 @@ namespace Scale_Eye_Monitor
 
                             ResetEyeFailureTracking();
                             ClearForcedReason();
+
+                            // Endpoint/input changes are effectively a new monitored target.
+                            // Show the next confirmed headline toast even if the new target
+                            // has the same state as the previous location.
+                            _forceNextHeadlineToast = true;
+
+                            if (eyeUrlChanged)
+                                ClearInvalidSoapUrlState();
                         }
                         else if (weightEndpointChanged && WeightModeEnabled)
                         {
@@ -349,9 +380,6 @@ namespace Scale_Eye_Monitor
                             // No endpoint change, but mode is off => ensure stopped.
                             StopWeightMonitor();
                         }
-
-                        if (locationChanged)
-                            SetTrayTextSafe($"Scale Eye Monitor ({LocationName})");
 
                         bool weightBehaviorChanged = weightEndpointChanged || weightTimingChanged || weightTuningChanged;
 
@@ -396,6 +424,9 @@ namespace Scale_Eye_Monitor
             finally
             {
                 _settingsDialogOpen = false;
+
+                // Restore main window topmost state (if enabled).
+                SetAlwaysOnTop(_alwaysOnTop);
             }
         }
 
@@ -405,14 +436,12 @@ namespace Scale_Eye_Monitor
             {
                 var dlg = _settingsDlg;
                 if (dlg is null || dlg.IsDisposed) return;
-                
+
                 dlg.BringToFront();
                 dlg.Activate();
-                //dlg.Focus();
             }
 
-            if (InvokeRequired) BeginInvoke((Action)Run);
-            else Run();
+            UiSafe(Run);
         }
 
         // =====================================================================
@@ -433,9 +462,14 @@ namespace Scale_Eye_Monitor
             {
                 using var rk = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: false);
                 var val = rk?.GetValue(RunValue) as string;
-                return !string.IsNullOrEmpty(val);
+
+                string desired = $"\"{Application.ExecutablePath}\"";
+                return string.Equals(val, desired, StringComparison.OrdinalIgnoreCase);
             }
-            catch { return false; }
+            catch
+            {
+                return false;
+            }
         }
 
         private void EnsureRunAtLogin(bool enable)
@@ -448,8 +482,18 @@ namespace Scale_Eye_Monitor
                 if (enable)
                 {
                     var exe = Application.ExecutablePath;
-                    rk.SetValue(RunValue, $"\"{exe}\" --tray");
-                    Log("Enabled Start with Windows.");
+                    string desired = $"\"{exe}\"";
+
+                    var current = rk.GetValue(RunValue) as string;
+                    bool changed = !string.Equals(current, desired, StringComparison.Ordinal);
+
+                    if (changed)
+                        rk.SetValue(RunValue, desired);
+
+                    if (string.IsNullOrEmpty(current))
+                        Log("Enabled Start with Windows.");
+                    else if (changed)
+                        Log("Updated Start with Windows.");
                 }
                 else
                 {
@@ -474,14 +518,27 @@ namespace Scale_Eye_Monitor
             try
             {
                 // ---- Eye / general ----
-                s.LocationName = dlg.LocationNameValue;
-                s.IpAddress = dlg.IpAddressValue;
+                s.EyeUrl = dlg.EyeUrlValue;
                 s.InputId = dlg.InputIdValue;
                 s.PollSeconds = dlg.PollSecondsValue;
 
                 s.EyeConfirmDelaySeconds = dlg.EyeConfirmDelaySecondsValue;
                 s.FailureRetryDelaySeconds = dlg.FailureRetryDelaySecondsValue;
                 s.FailureRetryCount = dlg.FailureRetryCountValue;
+
+                // ---- Notifications ----
+                var nd = dlg.NotificationDurationValue;
+
+                if (string.Equals(nd, "Disabled", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Disable notifications, but keep the last Short/Long choice in s.NotificationDuration.
+                    s.NotificationsEnabled = false;
+                }
+                else
+                {
+                    s.NotificationsEnabled = true;
+                    s.NotificationDuration = string.Equals(nd, "Long", StringComparison.OrdinalIgnoreCase) ? "Long" : "Short";
+                }
 
                 // ---- Weight mode ----
                 s.WeightModeEnabled = dlg.WeightModeEnabledValue;
@@ -498,6 +555,7 @@ namespace Scale_Eye_Monitor
                 s.WeightBurstCount = dlg.WeightBurstCountValue;
                 s.WeightBurstDelayMs = dlg.WeightBurstDelayMsValue;
                 s.WeightBurstMinTrueSuccess = dlg.WeightBurstMinTrueSuccessValue;
+                s.BlockedGuidanceMinWeight = dlg.BlockedGuidanceMinWeightValue;
 
                 s.WeightStableBand = dlg.WeightStableBandValue;
                 s.WeightZeroBand = dlg.WeightZeroBandValue;
@@ -510,11 +568,12 @@ namespace Scale_Eye_Monitor
                 s.BurstTestDelayMs = dlg.BurstTestDelayMsValue;
 
                 // Persist
-
+                // AppSettings.Save ensures settings directory exists
                 s.Save(SettingsPath);
-                try { Directory.CreateDirectory(appDataDir); } catch { }
+
                 // Run-at-login (registry-owned; not in AppSettings)
                 EnsureRunAtLogin(dlg.RunAtLoginEnabledValue);
+                UpdateStartupTrayMenuText();
 
                 return (true, null);
             }
@@ -530,12 +589,9 @@ namespace Scale_Eye_Monitor
         private static void CopyInto(AppSettings dst, AppSettings src)
         {
             // ---- Eye / general ----
-            dst.LocationName = src.LocationName;
-            dst.IpAddress = src.IpAddress;
+            dst.EyeUrl = src.EyeUrl;
             dst.InputId = src.InputId;
             dst.PollSeconds = src.PollSeconds;
-
-            dst.AlwaysOnTop = src.AlwaysOnTop;
 
             dst.EyeConfirmDelaySeconds = src.EyeConfirmDelaySeconds;
             dst.FailureRetryDelaySeconds = src.FailureRetryDelaySeconds;
@@ -556,6 +612,7 @@ namespace Scale_Eye_Monitor
             dst.WeightBurstCount = src.WeightBurstCount;
             dst.WeightBurstDelayMs = src.WeightBurstDelayMs;
             dst.WeightBurstMinTrueSuccess = src.WeightBurstMinTrueSuccess;
+            dst.BlockedGuidanceMinWeight = src.BlockedGuidanceMinWeight;
 
             dst.WeightStableBand = src.WeightStableBand;
             dst.WeightZeroBand = src.WeightZeroBand;
@@ -566,6 +623,12 @@ namespace Scale_Eye_Monitor
             dst.DebugLogging = src.DebugLogging;
             dst.BurstTestCount = src.BurstTestCount;
             dst.BurstTestDelayMs = src.BurstTestDelayMs;
+
+            dst.AlwaysOnTop = src.AlwaysOnTop;
+            dst.StartInTray = src.StartInTray;
+
+            dst.NotificationsEnabled = src.NotificationsEnabled;
+            dst.NotificationDuration = src.NotificationDuration;
         }
 
         private static AppSettings CloneSettings(AppSettings s)
