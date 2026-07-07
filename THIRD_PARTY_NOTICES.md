@@ -4,7 +4,7 @@ This project includes or derives from third-party assets.
 
 ## Flaticon / Freepik icon
 
-The application icon uses or is derived from the “Photoelectric Sensor” icon by Freepik from Flaticon.
+The application (EXE) icon uses or is derived from the “Photoelectric Sensor” icon by Freepik from Flaticon.
 
 Source: https://www.flaticon.com/free-icon/photoelectric-sensor_11232073
 
