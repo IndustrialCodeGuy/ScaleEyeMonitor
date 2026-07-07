@@ -9,20 +9,26 @@ namespace Scale_Eye_Monitor
         [STAThread]
         static void Main()
         {
-            bool createdNew;
-            _mutex = new Mutex(initiallyOwned: true, name: MutexName, createdNew: out createdNew);
+            _mutex = new Mutex(initiallyOwned: true, name: MutexName, createdNew: out bool createdNew);
 
             if (!createdNew)
             {
-                // Another instance is already running — ask it to show itself
+                // Another instance is already running - ask it to show itself
                 SingleInstance.SignalFirstInstance();
+                try { _mutex.Dispose(); } catch { }
+                _mutex = null;
                 return;
             }
 
             try
             {
                 ApplicationConfiguration.Initialize();
-                Application.Run(new MainForm());
+                using var form = new MainForm();
+
+                if (form.StartupCanceled)
+                    return;
+
+                Application.Run(form);
             }
             finally
             {
