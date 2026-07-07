@@ -1,0 +1,47 @@
+<!--
+  Application icon uses or is derived from:
+  "Photoelectric Sensor" icon by Freepik from Flaticon
+  https://www.flaticon.com/free-icon/photoelectric-sensor_11232073
+
+  Attribution notice is included in THIRD_PARTY_NOTICES.md.
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <RootNamespace>Scale_Eye_Monitor</RootNamespace>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <StartupObject>Scale_Eye_Monitor.Program</StartupObject>
+
+    <AssemblyName>ScaleEyeMonitor</AssemblyName>
+    <Product>Scale Eye Monitor</Product>
+    <Company></Company>
+    <Authors>Dan Michel</Authors>
+    <Description>Monitors scale eye status and displays tray notifications for alignment, blocked-eye, scale-motion, and connection states.</Description>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <ApplicationIcon>ScaleEyeMonitor.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Remove="ScaleEyeMonitor.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="README_Program.txt" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="README_Settings.txt" CopyToOutputDirectory="PreserveNewest" />
+
+	<Content Include="ScaleEye_Green128.png" CopyToOutputDirectory="PreserveNewest" />
+	<Content Include="ScaleEye_Red128.png" CopyToOutputDirectory="PreserveNewest" />
+	<Content Include="ScaleEye_Connected32.ico" CopyToOutputDirectory="PreserveNewest" />
+	<Content Include="ScaleEye_Disconnected32.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
