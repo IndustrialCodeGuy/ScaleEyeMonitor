@@ -45,7 +45,7 @@ The eye input alone cannot reliably prove that a truck is on the scale. Wind, de
 .
 ├─ README.md
 ├─ LICENSE.md
-└─ Scale_Eye_Monitor/
+└─ Scale Eye Monitor/
    ├─ Scale Eye Monitor.csproj
    ├─ Program.cs
    ├─ MainForm*.cs
@@ -58,8 +58,8 @@ The eye input alone cannot reliably prove that a truck is on the scale. Wind, de
 
 The root `README.md` is the public overview. The detailed operator and settings documentation is kept with the application files:
 
-- `Scale_Eye_Monitor/README_Program.txt`
-- `Scale_Eye_Monitor/README_Settings.txt`
+- `Scale Eye Monitor/README_Program.txt`
+- `Scale Eye Monitor/README_Settings.txt`
 
 Those files are copied to the publish output and are intended to sit next to the executable.
 
@@ -87,7 +87,7 @@ net8.0-windows10.0.19041.0
 From the repository root:
 
 ```powershell
-cd .\Scale_Eye_Monitor
+cd .\Scale Eye Monitor
 dotnet build "Scale Eye Monitor.csproj" -c Release
 ```
 
@@ -96,14 +96,14 @@ dotnet build "Scale Eye Monitor.csproj" -c Release
 Framework-dependent publish:
 
 ```powershell
-cd .\Scale_Eye_Monitor
+cd .\Scale Eye Monitor
 dotnet publish "Scale Eye Monitor.csproj" -c Release -r win-x64 --self-contained false
 ```
 
 Self-contained publish:
 
 ```powershell
-cd .\Scale_Eye_Monitor
+cd .\Scale Eye Monitor
 dotnet publish "Scale Eye Monitor.csproj" -c Release -r win-x64 --self-contained true
 ```
 
@@ -216,11 +216,11 @@ Review the weight stability settings. A naturally noisy stream may need a larger
 
 For full behavior details, see:
 
-- `Scale_Eye_Monitor/README_Program.txt`
+- `Scale Eye Monitor/README_Program.txt`
 
 For setting-by-setting guidance, see:
 
-- `Scale_Eye_Monitor/README_Settings.txt`
+- `Scale Eye Monitor/README_Settings.txt`
 
 ## License
 
