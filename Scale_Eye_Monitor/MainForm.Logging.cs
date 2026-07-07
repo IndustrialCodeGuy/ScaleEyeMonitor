@@ -16,7 +16,7 @@ namespace Scale_Eye_Monitor
      *   - Logging is best-effort: failures are written to Debug output and surfaced to the main status label
      *     (if the UI is still alive) to avoid throwing from background threads/timer callbacks.
      *
-     * Option 2 implementation:
+     * Implementation:
      *   - Log() enqueues lines to a single background writer (Channel)
      *   - One writer owns the file handle (prevents rare contention/lock scenarios)
      *   - Daily rolling file name (log_yyyyMMdd.txt)
@@ -27,6 +27,7 @@ namespace Scale_Eye_Monitor
         // =====================================================================
         //  Logging (single-writer queue)
         // =====================================================================
+        private const int LogQueueCapacity = 2048;
         private Channel<string>? _logChannel;
         private Task? _logTask;
         private CancellationTokenSource? _logCts;
@@ -34,19 +35,19 @@ namespace Scale_Eye_Monitor
 
         private void EnsureLogWriterStarted()
         {
-            if (_shutdown || _cleanupDone) return;
-
             lock (_logSync)
             {
-                if (_shutdown || _cleanupDone) return;
-
                 if (_logTask is not null && !_logTask.IsCompleted)
                     return;
 
-                _logChannel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+                _logChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(LogQueueCapacity)
                 {
                     SingleReader = true,
-                    SingleWriter = false
+                    SingleWriter = false,
+
+                    // If logging stalls (AV scan, IO hang, etc.), avoid unbounded memory growth.
+                    // Drop newest entries when full (TryWrite returns false, so we can debug-trace drops).
+                    FullMode = BoundedChannelFullMode.DropWrite
                 });
 
                 _logCts?.Dispose();
@@ -69,8 +70,7 @@ namespace Scale_Eye_Monitor
                 taskToWait = _logTask;
                 ctsToDispose = _logCts;
 
-                // Don't null everything yet if you want writers to no-op safely,
-                // but it's fine to clear references here if your Log() checks for null.
+                // Clear references after completing the writer so future Log() calls become no-ops.
                 _logTask = null;
                 _logChannel = null;
                 _logCts = null;
@@ -128,6 +128,35 @@ namespace Scale_Eye_Monitor
             DateTime currentDay = DateTime.MinValue;
             bool surfacedFail = false;
 
+            void CloseWriter()
+            {
+                try { sw?.Dispose(); } catch { }
+                sw = null;
+                currentDay = DateTime.MinValue;
+            }
+
+            StreamWriter GetWriterForToday()
+            {
+                var today = DateTime.Today;
+                if (sw is not null && today == currentDay)
+                    return sw;
+
+                CloseWriter();
+                currentDay = today;
+
+                var path = Path.Combine(LogDir, $"log_{today:yyyyMMdd}.txt");
+
+                // Single owner for writes; allow other processes to read/tail the file.
+                var fs = new FileStream(
+                path,
+                FileMode.Append,
+                FileAccess.Write,
+                FileShare.ReadWrite);
+
+                sw = new StreamWriter(fs) { AutoFlush = true };
+                return sw;
+            }
+
             try
             {
                 Directory.CreateDirectory(LogDir);
@@ -139,32 +168,13 @@ namespace Scale_Eye_Monitor
                         if (token.IsCancellationRequested && !reader.Completion.IsCompleted)
                             token.ThrowIfCancellationRequested();
 
-                        // Roll file daily
-                        var today = DateTime.Today;
-                        if (sw is null || today != currentDay)
-                        {
-                            try { sw?.Dispose(); } catch { }
-                            currentDay = today;
-
-                            var path = Path.Combine(LogDir, $"log_{today:yyyyMMdd}.txt");
-
-                            // Single owner for writes; allow other processes to read/tail the file.
-                            var fs = new FileStream(
-                                path,
-                                FileMode.Append,
-                                FileAccess.Write,
-                                FileShare.ReadWrite);
-
-                            sw = new StreamWriter(fs) { AutoFlush = true };
-                        }
-
                         // A couple quick retries for rare transient IO locks (AV/indexer/etc.)
                         bool wrote = false;
                         for (int attempt = 0; attempt < 3; attempt++)
                         {
                             try
                             {
-                                sw.WriteLine(line);
+                                GetWriterForToday().WriteLine(line);
                                 wrote = true;
                                 break;
                             }
@@ -172,10 +182,8 @@ namespace Scale_Eye_Monitor
                             {
                                 await Task.Delay(25, token).ConfigureAwait(false);
 
-                                // Reopen writer (in case the underlying handle got unhappy)
-                                try { sw?.Dispose(); } catch { }
-                                sw = null;
-                                currentDay = DateTime.MinValue; // force reopen next loop
+                                // Reopen writer on the next attempt in case the underlying handle got unhappy.
+                                CloseWriter();
                             }
                         }
 
@@ -200,21 +208,13 @@ namespace Scale_Eye_Monitor
             }
             finally
             {
-                try { sw?.Dispose(); } catch { }
+                CloseWriter();
             }
         }
 
         private void TrySurfaceLogFailToUi(string msg)
         {
-            try
-            {
-                if (_shutdown) return;
-                if (IsDisposed || Disposing) return;
-
-                if (IsHandleCreated)
-                    BeginInvoke(new Action(() => lblStatus.Text = msg));
-            }
-            catch { }
+            try { UiSafe(() => lblStatus.Text = msg); } catch { }
         }
 
         private void OpenLogFolder()
@@ -234,11 +234,6 @@ namespace Scale_Eye_Monitor
         //  Non-debug de-dupe (log only when something changes)
         // =====================================================================
         private string? _lastNonDebugUiLogSig;
-
-        private void LogVerbose(string message)
-        {
-            if (DebugLogging) Log(message);
-        }
 
         private void LogUiChangeIfNeeded(string signature, string message)
         {
