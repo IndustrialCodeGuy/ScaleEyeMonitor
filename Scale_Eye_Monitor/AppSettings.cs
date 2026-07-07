@@ -3,57 +3,69 @@ using System.Text.Json;
 namespace Scale_Eye_Monitor
 {
     /*
- * AppSettings
- * -----------
- * Persisted settings model + load/save helpers + clamp/normalize.
- *
- * Primary goal:
- *   Keep SettingsForm UI order, JSON property order, and MainForm.ApplySettings order aligned
- *   so settings remain easy to reason about and diff.
- *
- * UI / property ordering (matches SettingsForm):
- *   1) Eye settings
- *   2) Start with Windows (stored in HKCU Run key; NOT persisted here)
- *   3) Weight Mode toggle + weight settings
- *   4) Debug logging
- *   5) Burst test settings
- *
- * Weight Mode settings (current behavior):
- *   - WeightModeEnabled gates whether the weight monitor runs.
- *   - WeightPollSeconds is the default polling interval when weight is usable
- *     (StableZero or StableNonZero after fast-window).
- *   - PollSecondsStableNonZero + StableNonZeroFastWindowSeconds form the “fast window”
- *     when a truck first reaches StableNonZero (prevents fast polling all night).
- *   - Confirm delay is selected from the same timing branch as poll seconds:
- *       * EyeConfirmDelaySeconds (eyes-only OR weight unavailable)
- *       * WeightEyeConfirmDelaySeconds (normal weight-mode)
- *       * WeightEyeConfirmDelayFastSeconds (StableNonZero fast window)
- *   - Weight burst settings are used by MainForm.Polling only when weight mode is usable
- *     AND the weight state is StableZero (anti-false-positive burst on Eye #1).
- *
- * Notes:
- *   - NormalizeAndClamp() is called on load and before save.
- *   - LoadOrDefaults includes back-compat shims for older JSON keys.
- *   - “Start with Windows” is intentionally NOT persisted here.
- */
+     * AppSettings
+     * -----------
+     * Persisted settings model + load/save helpers + clamp/normalize.
+     *
+     * Primary goal:
+     *   Keep SettingsForm UI order, JSON property order, and MainForm.ApplySettings order aligned
+     *   so settings remain easy to reason about and diff.
+     *
+     * UI / property ordering (matches SettingsForm for dialog-edited fields):
+     *   1) Eye settings
+     *   2) Notifications (persisted here): NotificationsEnabled + NotificationDuration
+     *   3) Start with Windows (stored in HKCU Run key; NOT persisted here)
+     *   4) Weight Mode toggle + weight settings
+     *   5) Debug logging
+     *   6) Burst test settings
+     *   7) Startup UX (persisted here; toggled from tray): StartInTray, AlwaysOnTop
+     *
+     * Weight Mode settings (current behavior):
+     *   - WeightModeEnabled gates whether the weight monitor runs.
+     *   - WeightPollSeconds is the default polling interval when weight is usable
+     *     (StableZero or StableNonZero after the fast window).
+     *   - PollSecondsStableNonZero + StableNonZeroFastWindowSeconds form the “fast window”
+     *     when a truck first reaches StableNonZero (prevents fast polling all night).
+     *   - Confirm delay is selected from the same timing branch as poll seconds:
+     *       * EyeConfirmDelaySeconds (eyes-only OR weight unavailable)
+     *       * WeightEyeConfirmDelaySeconds (normal weight-mode)
+     *       * WeightEyeConfirmDelayFastSeconds (StableNonZero fast window)
+     *   - Weight burst settings are used by MainForm.Polling only when weight mode is usable
+     *     AND the weight state is StableZero (anti-false-positive burst on Eye #1).
+     *
+     * Notes:
+     *   - NormalizeAndClamp() is called on load and before save.
+     *   - Missing JSON properties use the current property defaults; keep defaults intentional.
+     *   - “Start with Windows” is intentionally NOT persisted here.
+     */
 
     public sealed class AppSettings
     {
+        private static readonly JsonSerializerOptions ReadJsonOptions = new()
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
+        private static readonly JsonSerializerOptions WriteJsonOptions = new()
+        {
+            WriteIndented = true
+        };
+
         // =====================================================================
         //  Eye / general (UI order)
         // =====================================================================
-        public string LocationName { get; set; } = "";
-        public string IpAddress { get; set; } = "";
+        // EyeUrl is treated as the exact SOAP endpoint URL.
+        public string EyeUrl { get; set; } = "";
         public int InputId { get; set; } = 0;
 
         // Base polling interval (eyes-only and default when not in stable-nonzero fast mode)
         public int PollSeconds { get; set; } = 15;
 
         // Seconds between Eye check #1 and Eye check #2
-        public int EyeConfirmDelaySeconds { get; set; } = 15;
+        public int EyeConfirmDelaySeconds { get; set; } = 20;
 
         // Failure policy
-        public int FailureRetryDelaySeconds { get; set; } = 5; // wait time between retries
+        public int FailureRetryDelaySeconds { get; set; } = 2; // wait time between retries
         public int FailureRetryCount { get; set; } = 3;        // failures-in-a-row before forcing disconnect
 
         // =====================================================================
@@ -67,7 +79,7 @@ namespace Scale_Eye_Monitor
         // Weight-mode default poll interval (used for StableZero and “normal” polling)
         public int WeightPollSeconds { get; set; } = 15;
 
-        // NEW: confirm delay used when Weight Mode is usable (enabled + not Unavailable)
+        // Confirm delay used when Weight Mode is usable (enabled + not Unavailable)
         public int WeightEyeConfirmDelaySeconds { get; set; } = 15;
 
         // Eye poll interval when stable non-zero weight is present
@@ -78,20 +90,24 @@ namespace Scale_Eye_Monitor
 
         // How long we keep the fast StableNonZero poll rate after entering StableNonZero.
         // After this, we revert to WeightPollSeconds until next motion event.
-        public int StableNonZeroFastWindowSeconds { get; set; } = 300;
+        public int StableNonZeroFastWindowSeconds { get; set; } = 120;
 
         // Weight-mode “normal poll burst” (StableZero and post-timeout StableNonZero)
         public int WeightBurstCount { get; set; } = 3;
-        public int WeightBurstDelayMs { get; set; } = 200;
+        public int WeightBurstDelayMs { get; set; } = 500;
 
         // Require at least N successful TRUE samples to treat burst as TRUE-candidate
         // (Any successful FALSE still returns OK immediately.)
         public int WeightBurstMinTrueSuccess { get; set; } = 1;
 
+        // Minimum absolute stable weight required before the Blocked state uses
+        // vehicle-on-scale guidance. Below this, use alignment/obstruction guidance.
+        public int BlockedGuidanceMinWeight { get; set; } = 1000;
+
         // Stability gating (weight stream interpretation)
         public int WeightStableBand { get; set; } = 20;   // +/- band
         public int WeightZeroBand { get; set; } = 50;     // abs(weight) < this => treat as "zero"
-        public int WeightWindowSeconds { get; set; } = 3; // rolling window for stability
+        public int WeightWindowSeconds { get; set; } = 2; // rolling window for stability
         public int WeightStaleSeconds { get; set; } = 3;  // if no update => unavailable
 
         // =====================================================================
@@ -100,19 +116,21 @@ namespace Scale_Eye_Monitor
         public bool DebugLogging { get; set; } = false;
 
         // Burst test settings (only relevant when DebugLogging is enabled in UI)
-        public int BurstTestCount { get; set; } = 50;
-        public int BurstTestDelayMs { get; set; } = 200;
+        public int BurstTestCount { get; set; } = 20;
+        public int BurstTestDelayMs { get; set; } = 500;
+
+        // Startup behavior (tray menu toggle; persisted)
+        // Controls whether the app starts with the main window hidden (tray only).
+        public bool StartInTray { get; set; } = true;
         public bool AlwaysOnTop { get; set; } = false;
+
+        // Notifications toggle (tray menu; persisted)
+        public bool NotificationsEnabled { get; set; } = true;     // default: enabled
+        public string NotificationDuration { get; set; } = "Short"; // "Short" or "Long" (Disabled is represented by NotificationsEnabled=false)
 
         // =====================================================================
         //  Helpers
         // =====================================================================
-        public string BuildServiceUrl()
-        {
-            if (string.IsNullOrWhiteSpace(IpAddress)) return "";
-            return $"http://{IpAddress}/Service.asmx";
-        }
-
         public static AppSettings LoadOrDefaults(string path, out bool existed)
         {
             existed = false;
@@ -125,54 +143,8 @@ namespace Scale_Eye_Monitor
 
                     var json = File.ReadAllText(path);
 
-                    // Normal deserialize (case-insensitive for safety)
-                    var s = JsonSerializer.Deserialize<AppSettings>(
-                        json,
-                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
-                    ) ?? new AppSettings();
-
-                    // Back-compat shims (only applied when the new key is missing)
-                    try
-                    {
-                        using var doc = JsonDocument.Parse(json);
-                        var root = doc.RootElement;
-
-                        // Old key "UseWeightBackup" -> new WeightModeEnabled
-                        if (!root.TryGetProperty(nameof(WeightModeEnabled), out _)
-                            && root.TryGetProperty("UseWeightBackup", out var legacy)
-                            && (legacy.ValueKind == JsonValueKind.True || legacy.ValueKind == JsonValueKind.False))
-                        {
-                            s.WeightModeEnabled = legacy.GetBoolean();
-                        }
-
-                        // If weight-mode poll settings are missing, keep old behavior.
-                        if (!root.TryGetProperty(nameof(WeightPollSeconds), out _))
-                            s.WeightPollSeconds = s.PollSeconds;
-
-                        if (!root.TryGetProperty(nameof(StableNonZeroFastWindowSeconds), out _))
-                            s.StableNonZeroFastWindowSeconds = 300;
-
-                        if (!root.TryGetProperty(nameof(WeightBurstCount), out _))
-                            s.WeightBurstCount = 3;
-
-                        if (!root.TryGetProperty(nameof(WeightBurstDelayMs), out _))
-                            s.WeightBurstDelayMs = 200;
-
-                        // Back-compat default for the newer "min true success" rule
-                        if (!root.TryGetProperty(nameof(WeightBurstMinTrueSuccess), out _))
-                            s.WeightBurstMinTrueSuccess = 1;
-
-                        // Back-compat default for separate weight-mode confirm delay
-                        if (!root.TryGetProperty(nameof(WeightEyeConfirmDelaySeconds), out _))
-                            s.WeightEyeConfirmDelaySeconds = s.EyeConfirmDelaySeconds;
-                        
-                        if (!root.TryGetProperty(nameof(WeightEyeConfirmDelayFastSeconds), out _))
-                            s.WeightEyeConfirmDelayFastSeconds = s.WeightEyeConfirmDelaySeconds;
-                    }
-                    catch
-                    {
-                        // ignore JSON doc parse errors; keep deserialized values
-                    }
+                    var s = JsonSerializer.Deserialize<AppSettings>(json, ReadJsonOptions)
+                        ?? new AppSettings();
 
                     s.NormalizeAndClamp();
                     return s;
@@ -180,8 +152,8 @@ namespace Scale_Eye_Monitor
             }
             catch
             {
-                // ignore and fall back to defaults
-                existed = false; // treat unreadable/invalid file as not usable
+                // Treat unreadable/invalid settings as not usable so first-run validation opens.
+                existed = false;
             }
 
             var d = new AppSettings();
@@ -197,7 +169,7 @@ namespace Scale_Eye_Monitor
             if (!string.IsNullOrWhiteSpace(dir))
                 Directory.CreateDirectory(dir);
 
-            var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+            var json = JsonSerializer.Serialize(this, WriteJsonOptions);
             var tmp = path + ".tmp";
             File.WriteAllText(tmp, json);
             File.Copy(tmp, path, overwrite: true);
@@ -220,7 +192,7 @@ namespace Scale_Eye_Monitor
             public const int EyeConfirmDelaySecondsMax = 120;
 
             public const int FailureRetryDelaySecondsMin = 1;
-            public const int FailureRetryDelaySecondsMax = 60;
+            public const int FailureRetryDelaySecondsMax = 30;
 
             public const int FailureRetryCountMin = 1;
             public const int FailureRetryCountMax = 10;
@@ -232,7 +204,6 @@ namespace Scale_Eye_Monitor
             public const int WeightPollSecondsMin = 1;
             public const int WeightPollSecondsMax = 120;
 
-            // Weight mode
             public const int WeightEyeConfirmDelaySecondsMin = 1;
             public const int WeightEyeConfirmDelaySecondsMax = 120;
 
@@ -242,23 +213,26 @@ namespace Scale_Eye_Monitor
             public const int WeightEyeConfirmDelayFastSecondsMin = 1;
             public const int WeightEyeConfirmDelayFastSecondsMax = 120;
 
-            public const int StableNonZeroFastWindowSecondsMin = 0;     // allow 0 => disable fast-window behavior
-            public const int StableNonZeroFastWindowSecondsMax = 3600;  // 1 hour cap (adjust if you want)
+            public const int StableNonZeroFastWindowSecondsMin = 0;
+            public const int StableNonZeroFastWindowSecondsMax = 300;
 
             public const int WeightBurstCountMin = 1;
             public const int WeightBurstCountMax = 20;
 
-            public const int WeightBurstDelayMsMin = 0;
-            public const int WeightBurstDelayMsMax = 2000;
+            public const int WeightBurstDelayMsMin = 100;
+            public const int WeightBurstDelayMsMax = 3000;
 
             public const int WeightBurstMinTrueSuccessMin = 1;
             public const int WeightBurstMinTrueSuccessMax = 20;
+
+            public const int BlockedGuidanceMinWeightMin = 0;
+            public const int BlockedGuidanceMinWeightMax = 100000;
 
             public const int WeightStableBandMin = 1;
             public const int WeightStableBandMax = 500;
 
             public const int WeightZeroBandMin = 1;
-            public const int WeightZeroBandMax = 5000;
+            public const int WeightZeroBandMax = 500;
 
             public const int WeightWindowSecondsMin = 1;
             public const int WeightWindowSecondsMax = 30;
@@ -268,10 +242,10 @@ namespace Scale_Eye_Monitor
 
             // Debug / burst
             public const int BurstTestCountMin = 1;
-            public const int BurstTestCountMax = 500;
+            public const int BurstTestCountMax = 100;
 
-            public const int BurstTestDelayMsMin = 0;
-            public const int BurstTestDelayMsMax = 5000;
+            public const int BurstTestDelayMsMin = 100;
+            public const int BurstTestDelayMsMax = 3000;
         }
 
         // =====================================================================
@@ -280,9 +254,17 @@ namespace Scale_Eye_Monitor
         public void NormalizeAndClamp()
         {
             // Strings
-            LocationName = (LocationName ?? "").Trim();
-            IpAddress = (IpAddress ?? "").Trim();
+            EyeUrl = (EyeUrl ?? "").Trim();
             WeightIp = (WeightIp ?? "").Trim();
+
+            NotificationDuration = NormalizeDuration(NotificationDuration);
+
+            static string NormalizeDuration(string? v)
+            {
+                if (string.IsNullOrWhiteSpace(v)) return "Short";
+                var s = v.Trim();
+                return s.Equals("Long", StringComparison.OrdinalIgnoreCase) ? "Long" : "Short";
+            }
 
             // Eye / general
             InputId = Math.Clamp(InputId, Limits.InputIdMin, Limits.InputIdMax);
@@ -323,6 +305,11 @@ namespace Scale_Eye_Monitor
             // Cross-setting sanity: can't require more TRUE successes than total burst samples
             if (WeightBurstMinTrueSuccess > WeightBurstCount)
                 WeightBurstMinTrueSuccess = WeightBurstCount;
+
+            BlockedGuidanceMinWeight = Math.Clamp(
+                BlockedGuidanceMinWeight,
+                Limits.BlockedGuidanceMinWeightMin,
+                Limits.BlockedGuidanceMinWeightMax);
 
             WeightStableBand = Math.Clamp(WeightStableBand, Limits.WeightStableBandMin, Limits.WeightStableBandMax);
             WeightZeroBand = Math.Clamp(WeightZeroBand, Limits.WeightZeroBandMin, Limits.WeightZeroBandMax);
