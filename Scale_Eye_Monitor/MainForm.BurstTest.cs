@@ -31,7 +31,7 @@ namespace Scale_Eye_Monitor
 
         // True while waiting-for-poll OR actively running the burst loop.
         private bool IsBurstRunning => _burstCts is not null;
-        
+
         // =====================================================================
         //  Progress message types (SettingsForm status box)
         // =====================================================================
@@ -60,10 +60,10 @@ namespace Scale_Eye_Monitor
                     return;
                 }
 
-                string ip = dlg.IpAddressValue;
-                if (string.IsNullOrWhiteSpace(ip) || !IpValidator.IsStrictIPv4(ip))
+                string url = dlg.EyeUrlValue;
+                if (string.IsNullOrWhiteSpace(url))
                 {
-                    MessageBox.Show(dlg, "IP address is invalid.", "Burst Test", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show(dlg, "SOAP endpoint URL cannot be empty.", "Burst Test", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
 
@@ -71,10 +71,9 @@ namespace Scale_Eye_Monitor
                 int count = Math.Clamp(dlg.BurstTestCountValue, 1, 500);
                 int delayMs = Math.Clamp(dlg.BurstTestDelayMsValue, 0, 5000);
 
-                string url = $"http://{ip}/Service.asmx";
                 string label = $"{count}x/{delayMs}ms";
 
-                // Optional clear each run
+                // Clear previous output for each run.
                 dlg.SetBurstStatus("", append: false);
 
                 IProgress<BurstMsg> progress = BuildBurstProgress(dlg);
@@ -115,14 +114,8 @@ namespace Scale_Eye_Monitor
 
         private async Task ToggleBurstTestFromDialogAsync(SettingsForm dlg, string url, int inputId, int count, int delayMs, string labelSuffix, IProgress<BurstMsg> progress)
         {
-            if (_shutdown) return;
-
-            // If already running, a toggle is a cancel.
-            if (IsBurstRunning)
-            {
-                CancelBurstTest();
-                return;
-            }
+            // Caller guarantees: not shutting down, and not already running.
+            // (The SettingsForm burst button handler cancels when running.)
 
             // Create CTS FIRST so "Cancel" can cancel the wait-for-poll too.
             _burstCts?.Dispose();
@@ -137,11 +130,18 @@ namespace Scale_Eye_Monitor
 
             try
             {
-                progress.Report(new(BurstMsgKind.Status, "Waiting for current poll to finish…"));
-
-                CancelActivePoll();
-                await _opGate.WaitAsync(token).ConfigureAwait(true);
-                gateHeld = true;
+                // Only show "waiting" if we actually have to wait for the gate.
+                if (_opGate.Wait(0))
+                {
+                    gateHeld = true;
+                }
+                else
+                {
+                    progress.Report(new(BurstMsgKind.Status, "Waiting for current poll to finish…"));
+                    CancelActivePoll();
+                    await _opGate.WaitAsync(token).ConfigureAwait(true);
+                    gateHeld = true;
+                }
 
                 _burstTask = RunBurstTestAsync(url, inputId, count, delayMs, labelSuffix: labelSuffix, progress: progress, token: token);
 
@@ -186,7 +186,7 @@ namespace Scale_Eye_Monitor
 
             if (string.IsNullOrWhiteSpace(url))
             {
-                progress?.Report(new(BurstMsgKind.Status, "Burst test: IP not configured"));
+                progress?.Report(new(BurstMsgKind.Status, "Burst test: SOAP endpoint URL not configured"));
                 return;
             }
 
@@ -196,11 +196,12 @@ namespace Scale_Eye_Monitor
             {
                 progress?.Report(new(BurstMsgKind.Status, $"{label} running…"));
 
-                var r = await RunEyeBurstTestAsync(url, inputId, count, delayMs, progress, token).ConfigureAwait(false);
+                var (ok, fail, canceled, _, wasCanceled) =
+                    await RunEyeBurstTestAsync(url, inputId, count, delayMs, progress, token).ConfigureAwait(false);
 
-                string verb = r.wasCanceled ? "Canceled" : "Complete";
-                string canceledPart = r.wasCanceled ? $", canceled={r.canceled}" : "";
-                string summary = $"{label} {verb} (ok={r.ok}, fail={r.fail}{canceledPart}, total={r.totalSeconds:0.000}s)";
+                string verb = wasCanceled ? "Canceled" : "Complete";
+                string canceledPart = wasCanceled ? $", canceled={canceled}" : "";
+                string summary = $"{label} {verb} (ok={ok}, fail={fail}{canceledPart})";
 
                 progress?.Report(new(BurstMsgKind.Status, summary));
             }
@@ -262,11 +263,10 @@ namespace Scale_Eye_Monitor
 
             int canceled = Math.Max(0, count - (ok + fail));
             string endWord = wasCanceled ? "CANCELED" : "END";
-            string canceledPart = wasCanceled ? $" canceled={canceled}" : "";
 
-            Log($"BurstTest {endWord} (total {totalSw.Elapsed.TotalSeconds:0.000}s) ok={ok} fail={fail}{canceledPart}");
+            Log($"BurstTest {endWord} (total {totalSw.Elapsed.TotalSeconds:0.000}s)");
 
-            progress?.Report(new(BurstMsgKind.Detail, $"BurstTest {endWord} (total {totalSw.Elapsed.TotalSeconds:0.000}s) ok={ok} fail={fail}{canceledPart}"));
+            progress?.Report(new(BurstMsgKind.Detail, $"BurstTest {endWord} (total {totalSw.Elapsed.TotalSeconds:0.000}s)"));
 
             return (ok, fail, canceled, totalSw.Elapsed.TotalSeconds, wasCanceled);
         }
