@@ -1,4 +1,4 @@
-﻿Scale Eye Monitor (ScaleEyeMonitor)
+Scale Eye Monitor (ScaleEyeMonitor)
 ===================================
 
 Purpose

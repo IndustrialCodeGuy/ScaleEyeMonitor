@@ -1,4 +1,4 @@
-﻿namespace Scale_Eye_Monitor
+namespace Scale_Eye_Monitor
 {
     /*
      * IpValidator
