@@ -4,8 +4,8 @@ namespace Scale_Eye_Monitor
      * IpValidator
      * -----------
      * Purpose:
-     *   Small, strict IPv4 string validator used throughout the app anywhere an endpoint is user-entered
-     *   (eye device IP, weight device IP).
+     *   Small, strict IPv4 string validator used for user-entered IPv4 endpoints
+     *   (currently the weight stream IP).
      *
      * Behavior:
      *   - Requires exactly four dot-separated octets.
