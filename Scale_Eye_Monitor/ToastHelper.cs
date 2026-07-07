@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Text;
 using Windows.Data.Xml.Dom;
@@ -10,39 +9,53 @@ namespace Scale_Eye_Monitor
     internal static class ToastHelper
     {
         /*
-     * ToastHelper
-     * -----------
-     * Minimal helper for Windows toast notifications from a classic Win32/WinForms process.
-     *
-     * What it does:
-     *   - Sets a process AppUserModelID (AUMID) for the current process.
-     *   - Ensures a Start Menu shortcut exists and is stamped with the same AUMID.
-     *     (Required for reliable toast delivery in many desktop contexts.)
-     *   - Sends a ToastGeneric notification by building raw toast XML and using WinRT APIs:
-     *       Windows.UI.Notifications / Windows.Data.Xml.Dom
-     *
-     * Usage:
-     *   - MainForm calls EnsureShortcut(debugLogging) during startup.
-     *   - MainForm.Ui calls ShowToast(...) for headline transitions (preferred),
-     *     with balloon notifications as fallback if toast cannot be shown.
-     *
-     * Design notes:
-     *   - Kept isolated because it contains COM interop + P/Invoke + WinRT toast APIs.
-     *   - EnsureShortcut overwrites the .lnk target/AUMID so upgrades/moves keep toasts working.
-     *   - COM objects are explicitly released to avoid long-lived RCW retention in a long-running app.
-     *
-     * Important:
-     *   - Aumid must be stable and unique to this app. If you change it, the shortcut must match.
-     */
+         * ToastHelper
+         * -----------
+         * Minimal helper for Windows toast notifications from a classic Win32/WinForms process.
+         *
+         * What it does:
+         *   - Sets a process AppUserModelID (AUMID) for the current process.
+         *   - Ensures a Start Menu shortcut exists and is stamped with the same AUMID.
+         *     (Required for reliable toast delivery in many desktop contexts.)
+         *   - Sends a ToastGeneric notification by building raw toast XML and using WinRT APIs:
+         *       Windows.UI.Notifications / Windows.Data.Xml.Dom
+         *
+         * Usage:
+         *   - MainForm calls EnsureShortcut(debugLogging) during startup.
+         *   - MainForm.Ui calls ShowToast(...) for headline transitions (preferred),
+         *     with balloon notifications as fallback if toast cannot be shown.
+         *
+         * Design notes:
+         *   - Kept isolated because it contains COM interop + P/Invoke + WinRT toast APIs.
+         *   - EnsureShortcut overwrites the .lnk target/AUMID so upgrades/moves keep toasts working.
+         *   - COM objects are explicitly released to avoid long-lived RCW retention in a long-running app.
+         *
+         * Important:
+         *   - Aumid must be stable and unique to this app. If you change it, the shortcut must match.
+         */
 
         // =====================================================================
         //  App identity
         // =====================================================================
-        private const string Aumid = "YourCompany.ScaleEyeMonitor"; // choose a unique string
+        private const string Aumid = "ScaleEyeMonitor.ScaleEyeMonitor";
+
+        // =====================================================================
+        //  Headline toast de-dupe (single "current status" toast)
+        // =====================================================================
+        private const string HeadlineToastTag = "headline";
+        private const string HeadlineToastGroup = "status";
+        private static readonly object _toastSync = new();
+        private static ToastNotification? _lastHeadlineToast;
 
         // =====================================================================
         //  Public API
         // =====================================================================
+
+        // MainForm wires this to its NotifyIcon.ShowBalloonTip(...) implementation.
+        public static Action<string, string, System.Windows.Forms.ToolTipIcon>? BalloonNotifier { get; set; }
+
+        // Global toggle (MainForm sets this)
+        public static bool Enabled { get; set; } = true;
 
         public static void EnsureShortcut(bool debugLogging = false)
         {
@@ -65,8 +78,6 @@ namespace Scale_Eye_Monitor
 
             // Always write/overwrite the shortcut so updates/moves keep the AUMID + target correct.
             IShellLinkW? link = null;
-            IPropertyStore? propStore = null;
-            IPersistFile? pf = null;
 
             try
             {
@@ -78,10 +89,10 @@ namespace Scale_Eye_Monitor
                 link.SetIconLocation(exePath, 0);
 
                 // Write AppUserModelID to the shortcut using IPropertyStore
-                propStore = (IPropertyStore)link;
+                var propStore = (IPropertyStore)link;
                 var pkey = PKEY_AppUserModel_ID;
 
-                PropVariant pv = new PropVariant(Aumid);
+                PropVariant pv = new(Aumid);
                 try
                 {
                     propStore.SetValue(ref pkey, ref pv);
@@ -93,7 +104,7 @@ namespace Scale_Eye_Monitor
                 }
 
                 // Save .lnk (overwrite)
-                pf = (IPersistFile)link;
+                var pf = (IPersistFile)link;
                 pf.Save(shortcutPath, true);
             }
             catch (Exception ex)
@@ -103,28 +114,76 @@ namespace Scale_Eye_Monitor
             }
             finally
             {
-                if (pf is not null) Marshal.FinalReleaseComObject(pf);
-                if (propStore is not null) Marshal.FinalReleaseComObject(propStore);
-                if (link is not null) Marshal.FinalReleaseComObject(link);
+                if (link is not null)
+                {
+                    try { Marshal.FinalReleaseComObject(link); }
+                    catch { }
+                }
             }
         }
 
-        public static void ShowToast(string title, string text, string headerPngFullPath)
+        public static NotificationSetting? GetWindowsNotificationSetting()
         {
+            try
+            {
+                return ToastNotificationManager.CreateToastNotifier(Aumid).Setting;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public static string GetWindowsNotificationStatusText()
+        {
+            return GetWindowsNotificationSetting() switch
+            {
+                NotificationSetting.Enabled => "Enabled",
+                NotificationSetting.DisabledForApplication => "Disabled for this app",
+                NotificationSetting.DisabledForUser => "Disabled in Windows",
+                NotificationSetting.DisabledByGroupPolicy => "Disabled by policy",
+                NotificationSetting.DisabledByManifest => "Disabled by manifest",
+                null => "Unknown",
+                _ => "Unknown"
+            };
+        }
+
+        public static bool OpenWindowsNotificationSettings(out string? error)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo("ms-settings:notifications")
+                {
+                    UseShellExecute = true
+                });
+
+                error = null;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        public static void ShowToast(string title, string text, string headerPngFullPath, bool longDuration)
+        {
+            if (!Enabled) return;
+
             // Build ToastGeneric XML with an app-logo override image (header icon)
             // NOTE: Use absolute file URIs for images.
             string headerUri = new Uri(Path.GetFullPath(headerPngFullPath)).AbsoluteUri;
 
+            string durationAttr = longDuration ? " duration='long'" : "";
+
             string xml =
-    $@"<toast activationType='foreground'>
+    $@"<toast activationType='foreground'{durationAttr}>
   <visual>
     <binding template='ToastGeneric'>
       <image placement='appLogoOverride' hint-crop='circle' src='{XmlEscape(headerUri)}' />
       <text>{XmlEscape(title)}</text>
       <text>{XmlEscape(text)}</text>
-      <!-- optional attribution line:
-      <text placement='attribution'>ScaleEyeMonitor</text>
-      -->
     </binding>
   </visual>
 </toast>";
@@ -133,49 +192,49 @@ namespace Scale_Eye_Monitor
             var doc = new XmlDocument();
             doc.LoadXml(xml);
 
-            var toast = new ToastNotification(doc);
+            var toast = new ToastNotification(doc)
+            {
+                Tag = HeadlineToastTag,
+                Group = HeadlineToastGroup
+            };
 
-            // Important: notifier must be created with your AUMID
+            // The notifier must be created with the app's AUMID.
             var notifier = ToastNotificationManager.CreateToastNotifier(Aumid);
-            notifier.Show(toast);
+            lock (_toastSync)
+            {
+                // Best-effort: dismiss the previous popup toast immediately.
+                var prev = _lastHeadlineToast;
+                if (prev is not null)
+                {
+                    try { notifier.Hide(prev); } catch { }
+                }
+
+                // Keep Notification Center clean: replace the prior "headline" entry.
+                try { ToastNotificationManager.History.Remove(HeadlineToastTag, HeadlineToastGroup, Aumid); } catch { }
+
+                _lastHeadlineToast = toast;
+                notifier.Show(toast);
+            }
         }
 
         public static void ShowWarningToast(string title, string text)
         {
-            try
-            {
-                string dir = Path.Combine(Path.GetTempPath(), "ScaleEyeMonitor");
-                Directory.CreateDirectory(dir);
+            if (!Enabled) return;
 
-                string pngPath = Path.Combine(dir, "toast_warning.png");
-                if (!File.Exists(pngPath))
-                {
-                    using var bmp = SystemIcons.Warning.ToBitmap();
-                    bmp.Save(pngPath, ImageFormat.Png);
-                }
+            var b = BalloonNotifier;
+            if (b is null) return;
 
-                ShowToast(title, text, pngPath);
-            }
-            catch { }
+            try { b(title, text, System.Windows.Forms.ToolTipIcon.Warning); } catch { }
         }
 
         public static void ShowInfoToast(string title, string text)
         {
-            try
-            {
-                string dir = Path.Combine(Path.GetTempPath(), "ScaleEyeMonitor");
-                Directory.CreateDirectory(dir);
+            if (!Enabled) return;
 
-                string pngPath = Path.Combine(dir, "toast_info.png");
-                if (!File.Exists(pngPath))
-                {
-                    using var bmp = SystemIcons.Information.ToBitmap();
-                    bmp.Save(pngPath, ImageFormat.Png);
-                }
+            var b = BalloonNotifier;
+            if (b is null) return;
 
-                ShowToast(title, text, pngPath);
-            }
-            catch { }
+            try { b(title, text, System.Windows.Forms.ToolTipIcon.Info); } catch { }
         }
 
         // =====================================================================
@@ -291,7 +350,7 @@ namespace Scale_Eye_Monitor
 
             public void Dispose()
             {
-                PropVariantClear(ref this);
+                _ = PropVariantClear(ref this);
             }
         }
 
